@@ -2,6 +2,7 @@ package gracefulshutdown_test
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -11,47 +12,45 @@ import (
 	"github.com/aramonc/graceful-shutdown/gracefulshutdown"
 )
 
-func TestContextHasToBeTerminable(t *testing.T) {
-	closer := &gracefulshutdown.Closer{Timeout: 200 * time.Millisecond}
-
-	err := closer.Wait(context.Background())
-
-	assert.Error(t, err)
-}
-
 func TestThatClosesMultipleConnections(t *testing.T) {
 	expectedClosed := 3
 	actualClosed := 0
 	didClose := make(chan int, 3)
-	closer := &gracefulshutdown.Closer{Timeout: 200 * time.Millisecond}
 
-	closer.Track(func(ctx context.Context) {
-		// can ignore context if it is not needed
-		didClose <- 1
-	})
+	parentCtx, cancel := context.WithCancel(context.Background())
+	_, closer := gracefulshutdown.BuildCloser(parentCtx, 200*time.Millisecond, os.Interrupt)
 
-	closer.Track(func(ctx context.Context) {
-		// can wait for the timeout
-		<-ctx.Done()
-		didClose <- 1
-	})
+	closer.Track(
+		func(ctx context.Context) {
+			// can ignore context if it is not needed
+			didClose <- 1
+		},
+	)
 
-	closer.Track(func(ctx context.Context) {
-		// can wait the context to be cancelled
-		go func(ctx context.Context, closed chan int) {
+	closer.Track(
+		func(ctx context.Context) {
+			// can wait for the timeout
 			<-ctx.Done()
-			closed <- 1
-		}(ctx, didClose)
-	})
+			didClose <- 1
+		},
+	)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	closer.Track(
+		func(ctx context.Context) {
+			// can wait the context to be cancelled
+			go func(ctx context.Context, closed chan int) {
+				<-ctx.Done()
+				closed <- 1
+			}(ctx, didClose)
+		},
+	)
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
 
-	err := closer.Wait(ctx)
+	err := closer.Wait()
 
 	require.NoError(t, err)
 

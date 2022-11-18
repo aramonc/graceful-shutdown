@@ -2,7 +2,8 @@ package gracefulshutdown
 
 import (
 	"context"
-	"errors"
+	"os"
+	"os/signal"
 	"sync"
 	"time"
 )
@@ -12,11 +13,23 @@ import (
 type CloserFunc func(context.Context)
 
 // Closer is an object that tracks shutdown functions and triggers
-// them on ctx.Close()
+// them on a termination signal
 type Closer struct {
 	// Timeout defines how long the closer has to allow CloserFuncs to close the service
 	Timeout time.Duration
 	funcs   []CloserFunc
+	ctx     context.Context
+	stop    context.CancelFunc
+}
+
+func BuildCloser(pc context.Context, timeout time.Duration, signals ...os.Signal) (context.Context, *Closer) {
+	ctx, stop := signal.NotifyContext(pc, signals...)
+
+	return ctx, &Closer{
+		Timeout: timeout,
+		stop:    stop,
+		ctx:     ctx,
+	}
 }
 
 // Track adds
@@ -24,19 +37,22 @@ func (c *Closer) Track(f CloserFunc) {
 	c.funcs = append(c.funcs, f)
 }
 
-func (c *Closer) Wait(ctx context.Context) error {
-	doneBus := ctx.Done()
-	if doneBus == nil {
-		return errors.New("context is not terminable, cannot wait")
-	}
+func (c *Closer) Wait() error {
+	<-c.ctx.Done()
 
-	<-doneBus
+	c.Close()
+
+	return nil
+}
+
+func (c *Closer) Close() {
+	c.stop()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(len(c.funcs))
 
 	for i, shutdown := range c.funcs {
-		shutdownCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 
 		go func(s CloserFunc, ctx context.Context, c context.CancelFunc, wg *sync.WaitGroup, i int) {
 			s(ctx)
@@ -46,6 +62,4 @@ func (c *Closer) Wait(ctx context.Context) error {
 	}
 
 	wg.Wait()
-
-	return nil
 }
